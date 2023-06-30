@@ -13,16 +13,17 @@ from matplotlib import pyplot as plt
 import copy
 import argparse
 import os
-
 from dataloader_video import getVideoDataLoader
-from model import Conv_LSTM
+
+from models.Resnet_3D import ResNet
+from models.C3D import cnn3d
 
 # model para
 latent_dim = 512
 hidden_size = 256
 num_layers = 4
 bidirectional = True
-num_classes = 7
+num_classes = 6
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,12 +34,16 @@ def train_test(model,
                device,
                optimizer,
                criterion,
+               type,
                scheduler=None):
     model = model.to(device)
     train_epoch_loss = 0
     train_epoch_acc = 0
     test_epoch_loss = 0
     test_epoch_acc = 0
+    label_count = {}
+    # 异常检测启动
+    torch.autograd.set_detect_anomaly(True)
 
     for phase in ["train", "test"]:
         samples = 0
@@ -51,15 +56,28 @@ def train_test(model,
         for index, (data, labels) in enumerate(dataloaders[phase]):
             X = torch.as_tensor(data).to(device)
             labels = torch.as_tensor(labels).to(device)
-            if phase == 'train':
+            optimizer.zero_grad()
+
+            if phase == 'train' and type == 'Emotion':
                 unique, counts = np.unique(labels.cpu().numpy(),
                                            return_counts=True)
-                print(unique)
-                print(counts)
-            optimizer.zero_grad()
+                # print(unique)
+                # print(counts)
+                for label in unique:
+                    if label not in list(label_count.keys()):
+                        label_count[label] = counts[unique.tolist().index(
+                            label)]
+                    else:
+                        label_count[label] += counts[unique.tolist().index(
+                            label)]
+
             with torch.set_grad_enabled(phase == 'train'):
                 y = model(X)
                 # print(y)
+                # print(labels)
+                # print(y.shape)
+                # print(labels.shape)
+
                 loss = criterion(y, labels)
 
                 if phase == "train":
@@ -70,6 +88,7 @@ def train_test(model,
                     0]  # We need to multiple by batch size as loss is the mean loss of the samples in the batch
                 samples += X.shape[0]
                 _, predicted = torch.max(y.data, 1)
+
                 correct_sum += (predicted == labels).sum().item()
                 # Print batch statistics every 50 batches
                 if index % 50 == 49 and phase == "train":
@@ -81,7 +100,9 @@ def train_test(model,
         # if scheduler is not None and phase == 'train':
         #     scheduler.step()
         # Print epoch statistics
+
         if phase == 'train':
+            print(label_count)
             train_epoch_acc = float(correct_sum) / float(samples)
             train_epoch_loss = float(loss_sum) / float(samples)
             print("epoch: {} - {} loss: {}, {} acc: {}".format(
@@ -92,6 +113,9 @@ def train_test(model,
             test_epoch_loss = float(loss_sum) / float(samples)
             print("epoch: {} - {} loss: {}, {} acc: {}".format(
                 epoch + 1, phase, test_epoch_loss, phase, test_epoch_acc))
+
+    # 异常检测关闭
+    torch.autograd.set_detect_anomaly(False)
 
     return train_epoch_loss, train_epoch_acc, test_epoch_loss, test_epoch_acc
 
@@ -112,19 +136,30 @@ def main():
 
     # ------------------ file path para ------------------
     train_data_path = '/workspace/chi149/MELD/MELD.Raw/train'
-    train_pic_folder = 'train_video_pic15'
-    train_filename_dic_pkl_name = 'train_video_filename_dic_15.pkl'
+    train_pic_folder = 'train_video_pic8'
+    train_filename_dic_pkl_name = 'train_video_filename_dic_8.pkl'
 
     test_data_path = '/workspace/chi149/MELD/MELD.Raw/test'
-    test_pic_folder = 'test_video_pic15'
-    test_filename_dic_pkl_name = 'test_video_filename_dic_15.pkl'
+    test_pic_folder = 'test_video_pic8'
+    test_filename_dic_pkl_name = 'test_video_filename_dic_8.pkl'
 
     if args.type == 'Speaker':
-        train_label_dic_pickle_name = 'train_video_speaker_dic_15.pkl'
-        test_label_dic_pickle_name = 'test_video_speaker_dic_15.pkl'
+        train_label_dic_pickle_name = 'train_video_speaker_dic_8.pkl'
+        test_label_dic_pickle_name = 'test_video_speaker_dic_8.pkl'
     elif args.type == 'Emotion':
-        train_label_dic_pickle_name = 'train_video_emotion_dic_15.pkl'
-        test_label_dic_pickle_name = 'test_video_emotion_dic_15.pkl'
+        train_label_dic_pickle_name = 'train_video_emotion_dic_8.pkl'
+        test_label_dic_pickle_name = 'test_video_emotion_dic_8.pkl'
+
+    # train_data_path = '/workspace/chi149/MELD/pathway/video_classification/testdata'
+    # train_pic_folder = 'train'
+    # train_filename_dic_pkl_name = 'train_filename_dic.pkl'
+
+    # test_data_path = '/workspace/chi149/MELD/pathway/video_classification/testdata'
+    # test_pic_folder = 'test'
+    # test_filename_dic_pkl_name = 'test_filename_dic.pkl'
+
+    # train_label_dic_pickle_name = 'train_video_emotion.pkl'
+    # test_label_dic_pickle_name = 'test_video_emotion.pkl'
 
     # ------------------ transforms ------------------
     trans_train = transforms.Compose([
@@ -148,30 +183,32 @@ def main():
     train_dataloader = getVideoDataLoader(train_data_path, train_pic_folder,
                                           train_filename_dic_pkl_name,
                                           train_label_dic_pickle_name,
-                                          trans_train, args.type,
+                                          trans_train, args.type, 'train',
                                           args.batch_size)
     test_dataloader = getVideoDataLoader(test_data_path, test_pic_folder,
                                          test_filename_dic_pkl_name,
                                          test_label_dic_pickle_name,
-                                         trans_test, args.type,
+                                         trans_test, args.type, 'test',
                                          args.batch_size)
     dataloaders = {'train': train_dataloader, 'test': test_dataloader}
-    print("------------------ get dataloader finish ------------------")
+
     print("train dataloader length: " + str(len(train_dataloader)))
     print("test dataloader length: " + str(len(test_dataloader)))
+    print("------------------ get dataloader finish ------------------")
 
     # ------------------ model define ------------------
-    net = Conv_LSTM(latent_dim, hidden_size, num_layers, bidirectional,
-                    num_classes)
+    # net = Conv_LSTM(latent_dim, hidden_size, num_layers, bidirectional,
+    #                 num_classes)
+    # net = Resnet.generate_model(101,num_classes)
+    net = cnn3d(num_classes)
     net = net.to(device)
-    # print(net)
 
     optimizer = optim.SGD(net.parameters(),
                           lr=1e-3,
                           momentum=0.9,
                           weight_decay=0.001)
-    # scheduler = StepLR(optimizer, step_size=20, gamma=0.1)
-    # optimizer = optim.Adam(net.parameters())
+    scheduler = StepLR(optimizer, step_size=20, gamma=0.1)
+    optimizer = optim.Adam(net.parameters())
     criterion = nn.CrossEntropyLoss()
 
     train_loss = []
@@ -185,7 +222,8 @@ def main():
 
     for epoch in range(args.epoches):
         train_epoch_loss, train_epoch_acc, test_epoch_loss, test_epoch_acc = train_test(
-            net, epoch, dataloaders, device, optimizer, criterion, None)
+            net, epoch, dataloaders, device, optimizer, criterion, args.type,
+            None)
         # scheduler.step(test_epoch_loss)
         print(optimizer.param_groups[0]["lr"])
         # Deep copy the model
@@ -200,17 +238,18 @@ def main():
         epoch_list.append(epoch)
 
     cur_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    os.mkdir("./emotion{}".format(cur_time))
-    torch.save(best_model_wts, "./emotion{}/best.pth".format(cur_time))
+    os.mkdir("./result/emotion{}".format(cur_time))
+    torch.save(best_model_wts, "./result/emotion{}/best.pth".format(cur_time))
     # torch.save(
     #     best_model_wts, "./emotion{}/vgg16.pth".format(cur_time))
     get_plot(epoch_list, train_loss,
-             './emotion{}/train_loss.jpg'.format(cur_time))
+             './result/emotion{}/train_loss.jpg'.format(cur_time))
     get_plot(epoch_list, train_acc,
-             './emotion{}/train_acc.jpg'.format(cur_time))
+             './result/emotion{}/train_acc.jpg'.format(cur_time))
     get_plot(epoch_list, test_loss,
-             './emotion{}/test_loss.jpg'.format(cur_time))
-    get_plot(epoch_list, test_acc, './emotion{}/test_acc.jpg'.format(cur_time))
+             './result/emotion{}/test_loss.jpg'.format(cur_time))
+    get_plot(epoch_list, test_acc,
+             './result/emotion{}/test_acc.jpg'.format(cur_time))
     # print(train_acc)
     # print(train_loss)
     # print(train_acc)
