@@ -102,11 +102,7 @@ def getVideoDataLoader(data_path, pic_folder, filename_dic_pkl_name,
                      type=type)
 
     if type == 'Emotion' and phase == 'train':
-        print
-        print(data.label_count)
         train_data_len = len(data.label_arr)
-        print(train_data_len)
-        print(data.label_arr)
         label_count_list = []
         for label in [
                 'anger', 'disgust', 'fear', 'joy', 'sadness', 'surprise',
@@ -116,7 +112,6 @@ def getVideoDataLoader(data_path, pic_folder, filename_dic_pkl_name,
                 label_count_list.append(data.label_count[label])
             else:
                 label_count_list.append(0)
-        print(label_count_list)
         class_weights = train_data_len / torch.tensor(label_count_list,
                                                       dtype=torch.float)
         print(class_weights)
@@ -135,11 +130,10 @@ def getVideoDataLoader(data_path, pic_folder, filename_dic_pkl_name,
                                 num_workers=16)
 
     else:
-        dataloader = DataLoader(
-            data,
-            batch_size=batch_size,
-            drop_last=False,
-            # shuffle=True,
-            num_workers=16)
+        dataloader = DataLoader(data,
+                                batch_size=batch_size,
+                                drop_last=False,
+                                shuffle=True,
+                                num_workers=16)
 
     return dataloader

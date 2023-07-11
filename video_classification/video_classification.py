@@ -15,15 +15,17 @@ import argparse
 import os
 from dataloader_video import getVideoDataLoader
 
-from models.Resnet_3D import ResNet
-from models.C3D import cnn3d
+from models.Resnet_3D import resnet50, resnet101
+from models.uniformer import Uniformer
+from models.CSN import csn101
+from timesformer_pytorch import TimeSformer
+# from models.C3D import cnn3d
 
 # model para
 latent_dim = 512
 hidden_size = 256
 num_layers = 4
 bidirectional = True
-num_classes = 6
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -41,11 +43,13 @@ def train_test(model,
     train_epoch_acc = 0
     test_epoch_loss = 0
     test_epoch_acc = 0
-    label_count = {}
+
     # 异常检测启动
     torch.autograd.set_detect_anomaly(True)
 
     for phase in ["train", "test"]:
+        label_count = {}
+        prediction_count = {}
         samples = 0
         loss_sum = 0
         correct_sum = 0
@@ -55,29 +59,22 @@ def train_test(model,
             model.eval()
         for index, (data, labels) in enumerate(dataloaders[phase]):
             X = torch.as_tensor(data).to(device)
+            # batch_size, depth, channels, h_x, w_x = X.shape
+            # X = X.view(batch_size, channels, depth, h_x, w_x)
+
             labels = torch.as_tensor(labels).to(device)
             optimizer.zero_grad()
 
-            if phase == 'train' and type == 'Emotion':
-                unique, counts = np.unique(labels.cpu().numpy(),
-                                           return_counts=True)
-                # print(unique)
-                # print(counts)
-                for label in unique:
-                    if label not in list(label_count.keys()):
-                        label_count[label] = counts[unique.tolist().index(
-                            label)]
-                    else:
-                        label_count[label] += counts[unique.tolist().index(
-                            label)]
+            unique, counts = np.unique(labels.cpu().numpy(),
+                                       return_counts=True)
+            for label in unique:
+                if label not in list(label_count.keys()):
+                    label_count[label] = counts[unique.tolist().index(label)]
+                else:
+                    label_count[label] += counts[unique.tolist().index(label)]
 
             with torch.set_grad_enabled(phase == 'train'):
                 y = model(X)
-                # print(y)
-                # print(labels)
-                # print(y.shape)
-                # print(labels.shape)
-
                 loss = criterion(y, labels)
 
                 if phase == "train":
@@ -88,6 +85,16 @@ def train_test(model,
                     0]  # We need to multiple by batch size as loss is the mean loss of the samples in the batch
                 samples += X.shape[0]
                 _, predicted = torch.max(y.data, 1)
+
+                unique, counts = np.unique(predicted.cpu().numpy(),
+                                           return_counts=True)
+                for label in unique:
+                    if label not in list(prediction_count.keys()):
+                        prediction_count[label] = counts[unique.tolist().index(
+                            label)]
+                    else:
+                        prediction_count[label] += counts[
+                            unique.tolist().index(label)]
 
                 correct_sum += (predicted == labels).sum().item()
                 # Print batch statistics every 50 batches
@@ -102,13 +109,24 @@ def train_test(model,
         # Print epoch statistics
 
         if phase == 'train':
-            print(label_count)
+            label_count = dict(sorted(label_count.items(), key=lambda x: x[0]))
+            prediction_count_sorted = dict(
+                sorted(prediction_count.items(), key=lambda x: x[0]))
+            print("train label count: {}".format(label_count))
+            print("train prediction label count: {}".format(
+                prediction_count_sorted))
             train_epoch_acc = float(correct_sum) / float(samples)
             train_epoch_loss = float(loss_sum) / float(samples)
             print("epoch: {} - {} loss: {}, {} acc: {}".format(
                 epoch + 1, phase, train_epoch_loss, phase, train_epoch_acc))
 
         elif phase == 'test':
+            label_count = dict(sorted(label_count.items(), key=lambda x: x[0]))
+            prediction_count_sorted = dict(
+                sorted(prediction_count.items(), key=lambda x: x[0]))
+            print("test label count: {}".format(label_count))
+            print("test prediction label count: {}".format(
+                prediction_count_sorted))
             test_epoch_acc = float(correct_sum) / float(samples)
             test_epoch_loss = float(loss_sum) / float(samples)
             print("epoch: {} - {} loss: {}, {} acc: {}".format(
@@ -133,6 +151,10 @@ def main():
     parser.add_argument('-batch_size', '--batch_size', type=int)
     parser.add_argument('-type', '--type', type=str)
     args = parser.parse_args()
+    if args.type == 'Emotion':
+        num_classes = 7
+    elif args.type == 'Speaker':
+        num_classes = 6
 
     # ------------------ file path para ------------------
     train_data_path = '/workspace/chi149/MELD/MELD.Raw/train'
@@ -164,16 +186,14 @@ def main():
     # ------------------ transforms ------------------
     trans_train = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Resize(256),
-        transforms.RandomCrop(224),
-        transforms.RandomHorizontalFlip(),
+        transforms.CenterCrop(224),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     ])
 
     trans_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Resize((224, 224)),
+        transforms.CenterCrop(224),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     ])
@@ -192,23 +212,57 @@ def main():
                                          args.batch_size)
     dataloaders = {'train': train_dataloader, 'test': test_dataloader}
 
-    print("train dataloader length: " + str(len(train_dataloader)))
-    print("test dataloader length: " + str(len(test_dataloader)))
+    # print("train dataloader length: " + str(len(train_dataloader)))
+    # print("test dataloader length: " + str(len(test_dataloader)))
     print("------------------ get dataloader finish ------------------")
 
     # ------------------ model define ------------------
     # net = Conv_LSTM(latent_dim, hidden_size, num_layers, bidirectional,
     #                 num_classes)
-    # net = Resnet.generate_model(101,num_classes)
-    net = cnn3d(num_classes)
+
+    # net = resnet50(num_classes)
+
+    # pretrain_path = "/workspace/chi149/MELD/pathway/video_classification/models/r3d50_K_200ep.pth"
+    # net = resnet50(num_classes)
+    # pre_weights = torch.load(pretrain_path)
+    # net.load_state_dict(pre_weights, False)
+    # in_features = net.fc.in_features
+    # net.fc = nn.Sequential(nn.Linear(in_features, 256), nn.ReLU(inplace=True),
+    #                        nn.Dropout(0.5), nn.Softmax(dim=1),
+    #                        nn.Linear(256, num_classes))
+
+    # net = cnn3d(num_classes)
+
+    net = csn101(num_classes)
+
+    # net = Uniformer(
+    #     num_classes=num_classes,  # number of output classes
+    #     dims=(64, 128, 256, 512),  # feature dimensions per stage (4 stages)
+    #     depths=(3, 4, 8, 3),  # depth at each stage
+    #     mhsa_types=(
+    #         'l', 'l', 'g', 'g'
+    #     )  # aggregation type at each stage, 'l' stands for local, 'g' stands for global
+    # )
+
+    # net = TimeSformer(dim=512,
+    #                   image_size=224,
+    #                   patch_size=16,
+    #                   num_frames=8,
+    #                   num_classes=num_classes,
+    #                   depth=12,
+    #                   heads=8,
+    #                   dim_head=64,
+    #                   attn_dropout=0.1,
+    #                   ff_dropout=0.1)
     net = net.to(device)
+    learning_rate = 0.01
 
     optimizer = optim.SGD(net.parameters(),
-                          lr=1e-3,
+                          lr=learning_rate,
                           momentum=0.9,
                           weight_decay=0.001)
     scheduler = StepLR(optimizer, step_size=20, gamma=0.1)
-    optimizer = optim.Adam(net.parameters())
+    # optimizer = optim.Adam(net.parameters())
     criterion = nn.CrossEntropyLoss()
 
     train_loss = []
@@ -221,6 +275,10 @@ def main():
     best_acc = 0.0
 
     for epoch in range(args.epoches):
+        if (epoch + 1) % 40 == 0:
+            learning_rate = learning_rate / 2
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = learning_rate
         train_epoch_loss, train_epoch_acc, test_epoch_loss, test_epoch_acc = train_test(
             net, epoch, dataloaders, device, optimizer, criterion, args.type,
             None)
@@ -238,18 +296,19 @@ def main():
         epoch_list.append(epoch)
 
     cur_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    os.mkdir("./result/emotion{}".format(cur_time))
-    torch.save(best_model_wts, "./result/emotion{}/best.pth".format(cur_time))
+    os.mkdir("./result/{}-{}".format(args.type, cur_time))
+    torch.save(best_model_wts,
+               "./result/{}-{}/best.pth".format(args.type, cur_time))
     # torch.save(
     #     best_model_wts, "./emotion{}/vgg16.pth".format(cur_time))
     get_plot(epoch_list, train_loss,
-             './result/emotion{}/train_loss.jpg'.format(cur_time))
+             './result/{}-{}/train_loss.jpg'.format(args.type, cur_time))
     get_plot(epoch_list, train_acc,
-             './result/emotion{}/train_acc.jpg'.format(cur_time))
+             './result/{}-{}/train_acc.jpg'.format(args.type, cur_time))
     get_plot(epoch_list, test_loss,
-             './result/emotion{}/test_loss.jpg'.format(cur_time))
+             './result/{}-{}/test_loss.jpg'.format(args.type, cur_time))
     get_plot(epoch_list, test_acc,
-             './result/emotion{}/test_acc.jpg'.format(cur_time))
+             './result/{}-{}/test_acc.jpg'.format(args.type, cur_time))
     # print(train_acc)
     # print(train_loss)
     # print(train_acc)
